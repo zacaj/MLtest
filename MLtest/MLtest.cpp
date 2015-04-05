@@ -5,12 +5,22 @@
 using namespace std;
 
 typedef std::pair<String, String> IdClass;
-struct Token
+
+class Symbol {
+public:
+	String str;
+	Symbol *last = NULL, *next = NULL;
+	virtual bool canBeConvertedFrom(Symbol* symbol) {
+		return false;
+	}
+};
+
+// a symbol that is raw text from a file
+class Token : public Symbol
 {
+public:
 	int line;
 	int pos;
-	String str;
-	Token *last=NULL, *next=NULL;
 	String after;
 	IdClass *idClass=NULL;
 	Token(String s)
@@ -27,12 +37,15 @@ vector<IdClass* > idClasses = {
 	new IdClass({ "+-/*|&!`~#$%^()[]?\\,.<>=:\'\"", "" }),
 };
 
+
 class Match {
 public:
 	/*
 		return the last token successfully matched, or NULL
 	*/
-	virtual Token* check(Token *token) = 0;
+	virtual Symbol* check(Symbol *symbol) {
+		return symbol;
+	}
 };
 class MString :public Match {
 public:
@@ -40,7 +53,7 @@ public:
 	MString(String _str) {
 		str = _str;
 	}
-	Token *check(Token *token) {
+	Symbol *check(Symbol *token) {
 		if (!token)
 			return NULL;
 		return token->str == str? token:NULL;
@@ -53,9 +66,10 @@ public:
 	MIdClass(IdClass *_idClass) {
 		idClass = _idClass;
 	}
-	Token* check(Token *token) {
-		if (!token)
+	Symbol* check(Symbol *s) {
+		if (!s)
 			return NULL;
+		Token *token = dynamic_cast<Token*>(s);
 		return token->idClass == idClass? token:NULL;
 	}
 };
@@ -68,22 +82,22 @@ public:
 	MSeries(vector<Match*> _matches) {
 		matches = _matches;
 	}
-	Token* check(Token *token) {
+	Symbol* check(Symbol *token) {
 		if (!token)
 			return NULL;
-		Token *lastToken = NULL;
+		Symbol *lastSymbol = NULL;
 		auto it = matches.begin();
 		for (; it != matches.end(); it++) {
-			Token *next = (*it)->check(token);
+			Symbol *next = (*it)->check(token);
 			if (next) {
-				lastToken = next;
+				lastSymbol = next;
 				token = next->next;
 			}
 			else
 				break;
 		}
 		if (it == matches.end())
-			return lastToken;
+			return lastSymbol;
 		return NULL;
 	}
 };
@@ -104,17 +118,17 @@ public:
 		terminal = _terminal;
 		max = _max;
 	}
-	Token* check(Token *token) {
+	Symbol* check(Symbol *token) {
 		if (!token && min>0)
 			return NULL;
 		int nMatch = 0;
-		Token *lastToken = NULL;
-		while (true) {
+		Symbol *lastSymbol = NULL;
+		while (token) {
 			if (terminal && terminal->check(token))
 				break;
-			Token *next = match->check(token);
+			Symbol *next = match->check(token);
 			if (next) {
-				lastToken = next;
+				lastSymbol = next;
 				token = next->next;
 				nMatch++;
 				if (nMatch == max)
@@ -128,7 +142,7 @@ public:
 		if (terminal)
 			return terminal->check(token);
 		else
-			return lastToken;
+			return lastSymbol;
 	}
 };
 #define many_(matches) ((new MMultiple(((matches)))))
@@ -137,33 +151,63 @@ public:
 #define many_n(matches,min) ((new MMultiple(((matches)),NULL,min)))
 #define opt_(matches) ((new MMultiple(((matches)),NULL,0,1)))
 
+class MAnyOf : public Match {
+public:
+	vector<Match*> possibilities;
+	MAnyOf(vector<Match*> _p) {
+		possibilities = _p;
+	}
+	Symbol* check(Symbol* token) {
+		auto it = possibilities.begin();
+		Symbol *found = NULL;
+		for (; it != possibilities.end(); it++) {
+			if ((found = (*it)->check(token)) != NULL)
+				break;
+		}
+		return found;
+	}
+};
+#define anyof_(matches) ((new MAny(((matches)))))
+
+class MNotPrecededBy : public Match {
+public:
+	Match *not;
+	Match *match;
+	MNotPrecededBy(Match *_match, Match *_not) {
+		not = _not;
+		match = _match;
+	}
+	Symbol* check(Symbol *symbol) {
+		if (!symbol)
+			return NULL; 
+		if (symbol->last) {
+			if ((not->check(symbol->last)) != NULL)
+				return NULL;
+		}
+		Symbol *end;
+		if ((end = match->check(symbol)) == NULL)
+			return NULL;
+		return end;
+	}
+};
 
 struct Macro
 {
 	String name;
 	Match *match;
+	double priority;
 };
 
 vector<Macro> macros = {
 	{
-		"identifierTest",
-		str_("void")
+		"multi-line comment",
+		series_(vector<Match*>({ str_("/*"), many_tn(new Match(), str_("*/"), 0) })),
+		2000
 	},
 	{
-		"stringTest",
-		id_(1)
-	},
-	{
-		"operatorTest",
-		id_(3)
-	},
-	{
-		"sentenceTest",
-		series_(vector<Match*>({ str_("the"), str_("quick"), str_("brown"), str_("fox") }))
-	},
-	{
-		"stringLiteralTest",
-		series_(vector<Match*>({ str_("\""), many_tn(id_(1),str_("\""),0) }))
+		"string literal",
+		series_(vector<Match*>({ str_("\""), many_tn(new Match() , new MNotPrecededBy(str_("\""),str_("\\")), 0) })),
+		1000
 	}
 };
 
@@ -180,7 +224,7 @@ int _tmain(int argc, _TCHAR* argv[])
 			break;
 	}
 	//file = "hello 123 goodbye123 1+2*chao3";
-	file = "\"aaa bbbb\"dfgd";
+	file = "\"aaa \\\" gsdgsdg\"dfgd";
 	vector<Token*> tokens;
 	int at = 0;
 	int line = 0;
@@ -197,7 +241,7 @@ int _tmain(int argc, _TCHAR* argv[])
 			if (file[at] == '\n') 
 				line++; 
 			if (token->last)
-				token->last->after += file[at];
+				((Token*)token->last)->after += file[at];
 			at++;	
 		}
 		for (auto match : idClasses)
@@ -223,7 +267,15 @@ int _tmain(int argc, _TCHAR* argv[])
 		}//uhh
 	}
 
-	Token* match=macros[4].match->check(tokens[0]);
+	{
+		vector<Symbol*> program;
+		for (auto token : tokens) {
+			program.push_back(token);
+		}
+
+		Symbol* match = macros[1].match->check(program[0]);
+		printf("%i\n", match);
+	}
 	return 0;
 }
 
