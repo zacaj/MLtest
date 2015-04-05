@@ -191,24 +191,71 @@ public:
 	}
 };
 
-struct Macro
+
+class Macro
 {
-	String name;
-	Match *match;
+public:
+	Match *pattern;
 	double priority;
+	virtual vector<Symbol*> onMatch(Symbol *begin, Symbol *end) = 0;
+	Macro(Match *_pattern, double _priority) {
+		pattern = _pattern;
+		priority = _priority;
+	}
 };
 
-vector<Macro> macros = {
+template<class T>
+class SingleResultMacro : public Macro {
+public:
+	SingleResultMacro(Match *_pattern, double _priority) : Macro(_pattern, _priority){}
+	virtual vector<Symbol*> onMatch(Symbol *begin, Symbol *end)
 	{
-		"multi-line comment",
-		series_(vector<Match*>({ str_("/*"), many_tn(new Match(), str_("*/"), 0) })),
-		2000
-	},
-	{
-		"string literal",
-		series_(vector<Match*>({ str_("\""), many_tn(new Match() , new MNotPrecededBy(str_("\""),str_("\\")), 0) })),
-		1000
+		vector<Symbol*> v;
+		v.push_back(new T(begin, end));
+			return v;
 	}
+};
+
+class MultilineComment : public Symbol {
+public:
+	String contents;
+	MultilineComment(Symbol *begin, Symbol *end) {
+		Symbol *sym = begin->next;
+		while (sym && sym != end) {
+			contents += sym->str;
+			Token *token = dynamic_cast<Token*>(sym);
+			if (token)
+				contents += token->after;
+			sym = sym->next;
+		}
+	}
+};
+
+class StringLiteral :public Symbol {
+public:
+	String contents;
+	StringLiteral(Symbol *begin, Symbol *end) {
+		Symbol *sym = begin->next;
+		while (sym && sym != end) {
+			contents += sym->str;
+			Token *token = dynamic_cast<Token*>(sym);
+			if (token)
+				contents += token->after;
+			sym = sym->next;
+		}
+		str = "\"" + contents + "\"";
+	}
+};
+
+vector<Macro*> macros = {
+	new SingleResultMacro<MultilineComment>(
+	series_(vector<Match*>({ str_("/"), str_("*"), many_tn(new Match(), series_(vector<Match*>({ str_("*"), str_("/") })), 0) })),
+		2000
+	),
+	new SingleResultMacro<StringLiteral>(
+		series_(vector<Match*>({ str_("\""), many_tn(new Match(), new MNotPrecededBy(str_("\""), str_("\\")), 0) })),
+		1000
+	),
 };
 
 int _tmain(int argc, _TCHAR* argv[])
@@ -224,7 +271,7 @@ int _tmain(int argc, _TCHAR* argv[])
 			break;
 	}
 	//file = "hello 123 goodbye123 1+2*chao3";
-	file = "\"aaa \\\" gsdgsdg\"dfgd";
+	file = "\"the quick \\\" /* commented out */ brown \\\" fox\" ERROR";
 	vector<Token*> tokens;
 	int at = 0;
 	int line = 0;
@@ -273,8 +320,38 @@ int _tmain(int argc, _TCHAR* argv[])
 			program.push_back(token);
 		}
 
-		Symbol* match = macros[1].match->check(program[0]);
-		printf("%i\n", match);
+		/*Symbol* match = macros[1]->pattern->check(program[0]);
+		printf("%i\n", match);*/
+
+		for (auto macro : macros) {
+			Symbol *sym = program[0];
+			while (sym) {
+				Symbol *end = macro->pattern->check(sym);
+				if (end) {
+					vector<Symbol*> replacement = macro->onMatch(sym, end);
+					if (sym->last) {
+						sym->last->next = replacement[0];
+						replacement[0]->last = sym->last;
+					}
+					else
+						program[0] = replacement[0];
+					if (end->next) {
+						end->next->last = replacement.back();
+						replacement.back()->next = end->next;
+					}
+					sym = replacement.back();
+					for (int i = 0; i<replacement.size(); i++) {
+						if (i>0)
+							replacement[i]->last = replacement[i - 1];
+						if (i + 1 < replacement.size())
+							replacement[i]->next = replacement[i + 1];
+					}
+				}
+				sym = sym->next;
+			}
+		}
+
+		printf("");
 	}
 	return 0;
 }
